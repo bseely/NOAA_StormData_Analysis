@@ -1,0 +1,261 @@
+---
+title: "NOAA Weather Event Analysis"
+author: "Bill Seely"
+date: "July 31, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Storms and other severe weather events can cause both public health and economic problems for communities and municipalities. Many severe events can result in fatalities, injuries, and property damage, and preventing such outcomes to the extent possible is a key concern.
+
+This project involves exploring the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database. This database tracks characteristics of major storms and weather events in the United States, including when and where they occur, as well as estimates of any fatalities, injuries, and property damage.
+
+Additional background data can be found in these online documents:
+
+1. National Weather Service Storm Data Documentation: https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf
+2. National Climatic Data Center Storm Events FAQ: https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf
+
+
+## Objective of this project
+
+The objective of this project is to analyze the NOAA dataset at (https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2) and answer two questions:
+
+1. Across the United States, which types of events (as indicated in the EVTYPE variable) are most harmful with respect to population health? 
+2. Across the United States, which types of events have the greatest economic consequences?
+
+## Set up R Environment
+
+###Load Required R Libraries
+
+```{r reqlibs, eval=FALSE}
+require(ggplot2)
+require(cowplot)
+require(ggthemes)
+require(stringr)
+require(dplyr)
+```
+
+###Set up Required Subdirectories if They Don't Exist
+```{r reqdirs, eval=FALSE}
+if(dir.exists("./data")==FALSE) dir.create("./data",recursive = FALSE)
+if(dir.exists("./figure")==FALSE) dir.create("./figure",recursive = FALSE)
+
+```
+## Data Access
+###Download the data file
+
+```{r dldata, echo=TRUE}
+download.file(url="https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2", destfile="./data/NOAA_StormData.csv.bz2")
+
+```
+
+###Load the data into R
+
+```{r readdata, echo=TRUE}
+NOAA_raw <- read.csv("./data/NOAA_StormData.csv.bz2",stringsAsFactors=FALSE)
+
+```
+## Data Processing
+
+Filter for Columns Needed in This Analysis
+
+```{r subsetcols, echo=TRUE}
+NOAA_proc<- NOAA_raw[, c("BGN_DATE","EVTYPE","FATALITIES","INJURIES", "PROPDMG", "PROPDMGEXP", "CROPDMG", "CROPDMGEXP")]
+```
+
+###Extract YEAR From BGN_DATE
+
+```{r makeyear, results="hide"}
+library(dplyr)
+NOAA_proc <- mutate(NOAA_proc,YEAR=as.integer(format(as.Date(BGN_DATE,format="%m/%d/%Y"),'%Y')))
+```
+
+###Look at Some Sample Rows
+
+```{r showrows, echo=TRUE}
+head(NOAA_proc)
+```
+
+###Calculate Costs in Dollars Using Lookup Table for EXP Codes
+###Create Lookup Table for EXP multipliers
+
+```{r makelookup, echo=TRUE}
+code<-(c("","h","H","k","K","m","M","b","B"))
+multiplier<-(c(1,100,100,1000,1000,1000000,1000000,1000000000,1000000000))
+EXP_Lookup<-data.frame(code, multiplier)
+names(EXP_Lookup)<-c("code","multiplier")
+```
+
+###Do multiplier lookup for cases where the EXP has a recognized meaning,
+###Default to first element (=1)  for all other values
+
+```{r lookupexp, echo=TRUE}
+NOAA_proc$CROPMULT<- EXP_Lookup$multiplier[match(NOAA_proc$CROPDMGEXP, EXP_Lookup$code, nomatch=1, incomparables = 1)]
+NOAA_proc$PROPMULT<- EXP_Lookup$multiplier[match(NOAA_proc$PROPDMGEXP, EXP_Lookup$code, nomatch=1, incomparables = 1)]
+```
+###Calculate Dollar Value Columns
+
+```{r costs, echo=TRUE}
+NOAA_proc$CROPDAMAGE <- NOAA_proc$CROPDMG * NOAA_proc$CROPMULT
+NOAA_proc$PROPDAMAGE <- NOAA_proc$PROPDMG * NOAA_proc$PROPMULT
+NOAA_proc$TOTLDAMAGE <- NOAA_proc$CROPDAMAGE + NOAA_proc$PROPDAMAGE
+```
+
+###Standardize Event Names using text functions (all caps, no spaces)
+
+```{r cleanup, echo=TRUE}
+library(stringr)
+NOAA_proc$EVTYPE_caps <- toupper(NOAA_proc$EVTYPE)
+NOAA_proc$EVTYPE_stripped <- str_replace_all(NOAA_proc$EVTYPE_caps, fixed(" "), "")
+```
+
+```{r count_events_byyr, echo=TRUE}
+library(dplyr)
+eventCtTrend <- NOAA_proc %>% group_by(YEAR) %>% summarize(eventCount=n_distinct(EVTYPE))
+eventCtTrend2 <- NOAA_proc %>% group_by(YEAR) %>% summarize(eventCount=n_distinct(EVTYPE_stripped))
+```
+
+
+###The years from 1993 through 2003 saw an explosion of EVTYPEs compared to before and afterward. 
+
+###There are two approaches I have used to work around this issue:
+
+###1. I filtered data to eliminate the problem years (1993-2003) where the number of event categories exploded:
+
+```{r filter_badyrs, echo=TRUE}
+NOAA_proc_filt <- NOAA_proc[NOAA_proc$YEAR<1993 | NOAA_proc$YEAR>2003,]
+```
+
+###2. Another approach was to manually create a translation from the raw event types to a standardized set of event types. This eliminates different spellings or word choices that refer to the same event, but introduces a measure of judgement into the process.
+
+Pull in manual standardization lookup
+```{r ev_lookup, echo=TRUE}
+std_Events_lookup <- read.csv("./data/EVENT_LOOKUP.csv",stringsAsFactors=FALSE)
+```
+
+Merge standardized names with the processed data file (NOAA_proc)
+``` {r std_evt, echo=TRUE}
+NOAA_proc_std<-merge(NOAA_proc, std_Events_lookup, by="EVTYPE")
+```
+
+
+``` {r sum_std_evt, echo=TRUE}
+eventCtTrend_std <- NOAA_proc_std %>% group_by(YEAR) %>%
+        summarize(eventCount=n_distinct(EVTYPE_std))
+```
+
+
+### This plot illustrates the explosion in the number of event types 1993-2003
+### This was remedied in some way from 1994 forward
+
+``` {r plot_cts, echo=FALSE }
+plot(eventCtTrend$eventCount ~ eventCtTrend$YEAR, xlab="", ylab="Count of Event Types", main="Trend in Count of Event Types")
+lines(eventCtTrend$YEAR, eventCtTrend$eventCount, lty=1, col="blue")
+lines(eventCtTrend2$YEAR, eventCtTrend2$eventCount, lty=1, col="red")
+lines(eventCtTrend2$YEAR, eventCtTrend_std$eventCount, lty=1, col="green")
+legend("topleft",legend = c("raw","cleaned","manual"), col = c("blue","red","green"), lty=1)
+```
+
+###The automatic standardization (all caps, removing spaces) has a minor impact (see the red line).
+###The manual standardization (a lookup file) has more of an impact but still leaves an anomaly.
+
+
+## QUESTION 1: ACROSS THE US, WHICH TYPES OF EVENTS ARE MOST HARMFUL WITH RESPECT TO POPULATION HEALTH?
+
+###First, create the ranked lists for storm injuries and storm deaths
+
+```{r Q1data, echo=TRUE}
+stormDeaths_filt <- aggregate(NOAA_proc_filt$FATALITIES, by = list(NOAA_proc_filt$EVTYPE_strip), FUN = sum)
+stormInjuries_filt <- aggregate(NOAA_proc_filt$INJURIES, by = list(NOAA_proc_filt$EVTYPE_strip), FUN = sum)
+HealthImpacts_filt <-cbind(stormDeaths_filt,stormInjuries_filt[2])
+names(HealthImpacts_filt)<-c("Event Type", "deaths", "injuries")
+EventTypesByDeaths_filt <- HealthImpacts_filt[order(-HealthImpacts_filt$deaths), ]
+EventTypesByInjuries_filt<- HealthImpacts_filt[order(-HealthImpacts_filt$injuries), ]
+
+EventTypesByDeaths_filt$`Event Type` <- factor(EventTypesByDeaths_filt$`Event Type`, levels = EventTypesByDeaths_filt$`Event Type`[order(-EventTypesByDeaths_filt$deaths)])
+EventTypesByInjuries_filt$`Event Type` <- factor(EventTypesByInjuries_filt$`Event Type`, levels = EventTypesByInjuries_filt$`Event Type`[order(-EventTypesByInjuries_filt$injuries)])
+```
+
+###Create the two plots that answer Question 1 with automatically standardized Event Types
+
+```{r Q1plot, message=FALSE}
+library(ggplot2)
+library(cowplot)
+g3 <- ggplot(data=head(EventTypesByDeaths_filt,10), aes(x=`Event Type`, y=deaths))+
+        geom_bar(stat="identity")+ theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+        ggtitle("Top 10 Events by Deaths") +
+        labs(x="Event Type",y="Deaths") 
+
+g4 <- ggplot(data=head(EventTypesByInjuries_filt,10), aes(x=`Event Type`, y=injuries))+
+        geom_bar(stat="identity")+ theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+        ggtitle("Top 10 Events by Injuries") +
+        labs(x="Event Type",y="Injuries") 
+
+plot_grid(g3, g4, align='h')
+```
+
+###You can see there is an obvious issue with this approach to standardizing the event names.
+###THUNDERSTORMWINDS and TSTMWIND seem like more or less the same thing.
+
+
+###For that reason, I wanted to repeat the ranking after applying the manually-standardized names.
+
+###Now, repeating the two rank lists with the manually-created standardized events
+
+```{r Q1data_s, echo=TRUE}
+stormDeaths_std <- aggregate(NOAA_proc_std$FATALITIES, by = list(NOAA_proc_std$EVTYPE_std), FUN = sum)
+stormInjuries_std <- aggregate(NOAA_proc_std$INJURIES, by = list(NOAA_proc_std$EVTYPE_std), FUN = sum)
+HealthImpacts_std <-cbind(stormDeaths_std,stormInjuries_std[2])
+names(HealthImpacts_std)<-c("Event Type", "deaths", "injuries")
+EventTypesByDeaths_std <- HealthImpacts_std[order(-HealthImpacts_std$deaths), ]
+EventTypesByInjuries_std<- HealthImpacts_std[order(-HealthImpacts_std$injuries), ]
+
+EventTypesByDeaths_std$`Event Type` <- factor(EventTypesByDeaths_std$`Event Type`, levels = EventTypesByDeaths_std$`Event Type`[order(-EventTypesByDeaths_std$deaths)])
+EventTypesByInjuries_std$`Event Type` <- factor(EventTypesByInjuries_std$`Event Type`, levels = EventTypesByInjuries_std$`Event Type`[order(-EventTypesByInjuries_std$injuries)])
+```
+
+###Create the two plots that answer Question 1 a second way, with manually-created standardized events:
+
+```{r Q1plot_s, echo=TRUE}
+library(ggplot2)
+library(cowplot)
+g1 <- ggplot(data=head(EventTypesByDeaths_std,10), aes(x=`Event Type`, y=deaths))+
+        geom_bar(stat="identity")+ theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+        ggtitle("Top 10 Events by Deaths") +
+        labs(x="Event Type",y="Deaths") 
+
+g2 <- ggplot(data=head(EventTypesByInjuries_std,10), aes(x=`Event Type`, y=injuries))+
+        geom_bar(stat="identity")+ theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+        ggtitle("Top 10 Events by Injuries") +
+        labs(x="Event Type",y="Injuries") 
+
+plot_grid(g1, g2, align='h')
+```
+
+### This fixes the two version issue (THUNDERSTORMWIND,TSTMWIND)
+
+`r paste("The type of weather event that causes the most deaths is: ", as.character(EventTypesByDeaths_std[1,1]))`
+
+`r paste("The type of weather event that causes the most injuries is: ", as.character(EventTypesByInjuries_std[1,1]))`
+
+
+
+## QUESTION 2: ACROSS THE US, WHICH TYPES OF EVENTS HAVE THE GREATEST ECONOMIC CONSEQUENCES?
+
+###First, calculate the total damage by standardized Event Type, and sort by Total Damage
+
+```{r Q2Data, echo=TRUE}
+totlDamage <- aggregate(NOAA_proc$TOTLDAMAGE, by = list(NOAA_proc$EVTYPE_strip), FUN = sum)
+names(totlDamage)<-c("Event Type", "Total Damage")
+totlDamage$`Event Type` <- factor(totlDamage$`Event Type`, levels = totlDamage$`Event Type`[order(-totlDamage$'Total Damage')])
+totlDamage_sort<- totlDamage[order(-totlDamage$`Total Damage`), ]
+```
+
+###Now answering the question:
+
+`r  paste("The type of weather event that has the greatest economic consequences is: ", as.character(totlDamage_sort[1,1]))`
